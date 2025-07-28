@@ -46,6 +46,18 @@ def send_telegram_message(text, chat_ids):
             "disable_web_page_preview": True
         })
 
+def send_telegram_photo(photo_url, caption, chat_ids):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
+    for chat_id in chat_ids:
+        resp = requests.post(url, data={
+            "chat_id": chat_id,
+            "photo": photo_url,
+            "caption": caption,
+            "parse_mode": "HTML"
+        })
+        # debug print, если хочешь видеть ошибки Telegram
+        # print(resp.text)
+
 def get_new_items(b24, last_checked):
     filter_params = {
         ">=createdTime": last_checked
@@ -95,10 +107,12 @@ def main():
                 f"💰 <b>Сума закриття:</b> <b>{amount}</b>\n"
                 f"📝 <b>Коментар:</b> <i>{comment}</i>"
             )
+            # Если есть ссылка на изображение — отправляем фото!
             if url_machine and url_machine.startswith("http"):
-                text += f"\n\n🔗 <a href=\"{url_machine}\">Завантажити гарантійний лист</a>"
+                send_telegram_photo(url_machine, text, TELEGRAM_CHAT_IDS)
+            else:
+                send_telegram_message(text, TELEGRAM_CHAT_IDS)
 
-            send_telegram_message(text, TELEGRAM_CHAT_IDS)
             sent_ids.add(item_id)
 
         last_checked = now
