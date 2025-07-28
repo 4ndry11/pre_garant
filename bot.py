@@ -4,12 +4,18 @@ from b24 import B24
 import pandas as pd
 import os
 import urllib.parse
+import os
 
 # === Настройки ===
 B24_DOMAIN = "ua.zvilnymo.com.ua"
 B24_USER_ID = 596
 ENTITY_TYPE_ID = 1042  # ID смарт-процесса Гарантійні листи
 TELEGRAM_CHAT_IDS = [-1002345888899]
+
+B24_TOKEN = os.environ.get("B24_TOKEN")
+B24_TOKEN_USERS = os.environ.get("B24_TOKEN_USERS")
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+
 
 FIELDS = [
     "ID",
