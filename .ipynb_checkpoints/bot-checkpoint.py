@@ -53,7 +53,6 @@ def get_new_items(b24, last_checked):
     return items
 
 def main():
-    b24 = B24(domain="ua.zvilnymo.com.ua", user_id=596, token=B24_TOKEN)
     last_checked = pd.Timestamp.now() - pd.Timedelta("5min")
     sent_ids = set()
 
