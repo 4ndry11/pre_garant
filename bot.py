@@ -172,21 +172,30 @@ def call_crm_item_list(b24, params: dict):
     while True:
         payload = dict(params)
         payload["start"] = start
-        log(f"[B24] crm.item.list call page={page} start={start} payload={{{k: payload[k] for k in ['entityTypeId','select','filter','order'] if k in payload}}}")
+
+        # ✅ фикс логов: собираем preview заранее
+        payload_preview = {key: payload.get(key) for key in ("entityTypeId", "select", "filter", "order")}
+        log(f"[B24] crm.item.list call page={page} start={start} payload={payload_preview}")
+
         resp = b24.call("crm.item.list", payload) or {}
         result = resp.get("result") or {}
         batch = result.get("items") or []
         next_pos = result.get("next")
         total = result.get("total")
+
         log(f"[B24] page={page} got={len(batch)} next={next_pos} total={total}")
         items.extend(batch)
+
         if next_pos is None:
             break
+
         start = next_pos
         page += 1
         time.sleep(0.1)
+
     log(f"[B24] total fetched items={len(items)}")
     return items
+
 
 def get_current_max_id(b24):
     items = call_crm_item_list(b24, {
