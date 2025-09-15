@@ -1,11 +1,9 @@
 # -*- coding: utf-8 -*-
 """
 Гарантійні листи -> Telegram
-Водорозділ по ID (in-memory, без файлів), safe-відправка з фолбеком на текст,
-кеш користувачів, автопочаток від поточного максимального ID.
-
-Потрібні лише ці ENV: B24_TOKEN, B24_TOKEN_USERS, TELEGRAM_TOKEN
-(жодних нових змінних/файлів не створюємо)
+In-memory watermark по ID (без файлів), safe-відправка з фолбеком на текст,
+кеш користувачів, старт із поточного max ID.
+Під твою обгортку B24: get_list без order, всі запити з order – через call().
 """
 import os
 import time
@@ -13,11 +11,12 @@ import requests
 import pandas as pd
 from b24 import B24
 
-# ===== Налаштування (без нових ENV) =====
+# ===== Налаштування =====
 B24_DOMAIN = "ua.zvilnymo.com.ua"
 B24_USER_ID = 596
 ENTITY_TYPE_ID = 1042                         # смарт-процес "Гарантійні листи"
 TELEGRAM_CHAT_IDS = [-1002345888899]          # куди шлемо
+
 B24_TOKEN = os.environ.get("B24_TOKEN")
 B24_TOKEN_USERS = os.environ.get("B24_TOKEN_USERS")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -35,12 +34,11 @@ FIELDS = [
     "ufCrm11_1750708749"    # файл-гарантійний лист
 ]
 
-# ===== Утиліти =====
 def log(*a):
     if DEBUG:
         print(*a)
 
-# ---- Telegram ----
+# ---------------- Telegram ----------------
 def tg_send_message_safe(text, chat_ids) -> bool:
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     ok_any = False
@@ -77,11 +75,12 @@ def tg_send_photo_safe(photo_url, caption, chat_ids) -> bool:
             log("TG sendPhoto exception:", e)
     return ok_any
 
-# ---- Bitrix24 ----
+# ---------------- Bitrix24 helpers ----------------
 def load_users_dict(b24_users: B24):
     users = b24_users.get_list("user.get", select=["ID","NAME","LAST_NAME","SECOND_NAME"])
     df = pd.DataFrame(users or [])
-    if df.empty: return {}
+    if df.empty:
+        return {}
     df["FIO"] = (
         df[["LAST_NAME","NAME","SECOND_NAME"]]
         .fillna("").agg(" ".join, axis=1)
@@ -92,24 +91,32 @@ def load_users_dict(b24_users: B24):
         uid = r.get("ID")
         fio = r.get("FIO") or r.get("NAME") or ""
         out[str(uid)] = fio
-        try: out[int(uid)] = fio
-        except Exception: pass
+        try:
+            out[int(uid)] = fio
+        except Exception:
+            pass
     return out
 
 def fetch_user_name_by_id(uid, b24_users: B24):
-    if uid in (None,"",0): return None
+    if uid in (None,"",0):
+        return None
     try:
-        data = b24_users.call("user.get", {"ID": uid})
+        res = b24_users.call("user.get", {"ID": uid})
+        data = (res or {}).get("result")
         user = data[0] if isinstance(data, list) else data
     except Exception:
         user = None
+
     if not user:
         try:
-            res = b24_users.get_list("user.search", FILTER={"ID": uid})
+            res = b24_users.get_list("user.search", b24_filter={"ID": uid})
             user = res[0] if isinstance(res, list) and res else None
         except Exception:
             user = None
-    if not user: return None
+
+    if not user:
+        return None
+
     last = (user.get("LAST_NAME") or "").strip()
     name = (user.get("NAME") or "").strip()
     mid  = (user.get("SECOND_NAME") or "").strip()
@@ -127,8 +134,10 @@ def resolve_creator_name(item, users_dict, b24_users: B24):
     fio = fetch_user_name_by_id(raw_uid, b24_users)
     if fio:
         users_dict[str(raw_uid)] = fio
-        try: users_dict[int(raw_uid)] = fio
-        except Exception: pass
+        try:
+            users_dict[int(raw_uid)] = fio
+        except Exception:
+            pass
         return fio
     return "Невідомо"
 
@@ -136,6 +145,7 @@ def get_public_file_url(file_field, b24: B24):
     """
     Повертає придатний до TG URL: url/downloadUrl/urlMachine.
     Якщо недоступно — вертає None (тоді шлемо текст).
+    (Без disk.file.get, щоб не ускладнювати права/сесії.)
     """
     node = None
     if isinstance(file_field, dict):
@@ -149,43 +159,61 @@ def get_public_file_url(file_field, b24: B24):
         v = node.get(k)
         if v and str(v).startswith("http"):
             return v
-    # (без disk.file.get — щоб не ускладнювати)
     return None
 
-def get_items_after_id(b24: B24, last_id: int):
+# ---------- CRM items via call() with order/pagination ----------
+def call_crm_item_list(b24: B24, params: dict):
     """
-    Тягнемо елементи з ID > last_id (ASC). Без файлів, просто in-memory watermark.
+    Обгортка над b24.call для crm.item.list з ручною пагінацією (через start).
+    Повертає суцільний список items.
     """
-    filter_params = {">id": int(last_id)}
-    items = b24.get_list(
-        "crm.item.list",
-        entityTypeId=ENTITY_TYPE_ID,
-        select=FIELDS,
-        order={"id": "ASC"},
-        b24_filter=filter_params,   # дублюємо на випадок поведінки обгортки
-        filter=filter_params,
-        start=0
-    )
-    if not isinstance(items, list):
-        items = items.get("items", []) if isinstance(items, dict) else []
+    items = []
+    start = 0
+    while True:
+        payload = dict(params)
+        payload["start"] = start
+        resp = b24.call("crm.item.list", payload) or {}
+        # очікуваний формат: {'result': {'items': [...], 'next': N, 'total': T}}
+        result = resp.get("result") or {}
+        batch = result.get("items") or []
+        items.extend(batch)
+        next_pos = result.get("next")
+        if next_pos is None:
+            break
+        start = next_pos
+        if DEBUG:
+            log(f"crm.item.list page@{start}, got {len(batch)}")
+        # невелика пауза, щоб не впертись у ліміти
+        time.sleep(0.1)
     return items
 
 def get_current_max_id(b24: B24) -> int:
     """
     Разово на старті беремо поточний максимальний ID у смарт-процесі.
-    Це і є початкова «точка відліку», щоб не чіпати старі елементи.
+    Через call(), бо потрібен order={"id":"DESC"} і пагінація.
     """
-    items = b24.get_list(
-        "crm.item.list",
-        entityTypeId=ENTITY_TYPE_ID,
-        select=["ID"],
-        order={"id": "DESC"},
-        start=0
-    )
-    if isinstance(items, dict): items = items.get("items", [])
-    if not items: return 0
+    items = call_crm_item_list(b24, {
+        "entityTypeId": ENTITY_TYPE_ID,
+        "select": ["ID"],
+        "order": {"id": "DESC"}
+    })
+    if not items:
+        return 0
+    # Перша позиція після сортування DESC — найбільший ID
     first = items[0]
     return int(first.get("ID") or first.get("id") or 0)
+
+def get_items_after_id(b24: B24, last_id: int):
+    """
+    Тягнемо елементи з ID > last_id (ASC) через call() + власна пагінація.
+    """
+    items = call_crm_item_list(b24, {
+        "entityTypeId": ENTITY_TYPE_ID,
+        "select": FIELDS,
+        "filter": {">id": int(last_id)},
+        "order": {"id": "ASC"}
+    })
+    return items or []
 
 # ===== Основний цикл =====
 def main():
@@ -258,7 +286,6 @@ def main():
                 else:
                     log(f"[WARN] TG not sent for id={item_id}; не зсуваємо last_id")
 
-            # наступна ітерація
             time.sleep(10)
 
         except Exception as e:
